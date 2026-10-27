@@ -1,0 +1,46 @@
+$ python3 nightwatchman.py --demo --roe-id DEMO-ROE-001 --auth-ref DEMO-AUTH-42 --operator "Jane Doe" --i-have-roe --watchlist-extra nightwatchman.local.example.json -o /tmp/nwdemo --no-clear
+[*] The Night Watchman 0.2.2  —  mode: demo  profile: broad
+[*] ROE ID: DEMO-ROE-001   Authorization: DEMO-AUTH-42   Operator: Jane Doe
+[*] Authorized use only: written authorization / rules of engagement required; metadata only; any receiver brought into a controlled area needs the site owner's or operator's own approval first.
+[*] The gate records the operator's attestation of authorization. It does not verify the ROE.
+[*] HYPOTHESIS, NOT A FINDING. Pattern match on SSID/name/OUI metadata only.
+[*] Attribution of any device to a person, vehicle, or purpose is left to site security or the investigating party.
+[*] 0444 + SHA256SUMS supports integrity but is NOT tamper-proof; record the SHA256SUMS digest out-of-band (ROE log or custodian handoff).
+Devices seen: 6   Candidates: 5   2026-10-27T18:25:29Z
+
+BASIS     SSID / BT NAME           MAC               VENDOR               CH   dBm TREND (hint)   LAST SEEN (UTC)
+-----------------------------------------------------------------------------------------------------------------
+name+oui  IPC-Lobby-3              BC:AD:28:00:00:02 Hangzhou Hikvisio…   11   -49 steady         18:26:04Z
+name      =HYPERLINK("http://x","… 02:00:00:00:00:04 Unknown               6   -66 steady         18:26:04Z
+oui       —                        3C:EF:8C:00:00:03 Zhejiang Dahua Te…    1   -72 steady         18:26:04Z
+name+oui  Garmin Dash Cam 67W      F0:00:00:00:00:05 Garmin Internatio…        -76 mixed          18:26:04Z
+name      WOLFBOX_MODEL123_5A2C    02:1A:11:00:00:01 Unknown               6   -77 varying        18:26:04Z
+
+Each row: candidate: SSID resembles a camera/dash cam (or vendor/BT variant). Confidence: name/oui = low, name+oui = medium.
+[+] Wrote 6 read-only files to /tmp/nwdemo
+[*] 0444 + SHA256SUMS supports integrity but is NOT tamper-proof; record the SHA256SUMS digest out-of-band (ROE log or custodian handoff).
+[*]   candidates.csv
+[*]   candidates.json
+[*]   session.json
+[*]   config_used.json
+[*]   overlay_used.json
+[*]   SHA256SUMS
+
+$ cd /tmp/nwdemo && sha256sum -c SHA256SUMS && ls -l
+candidates.csv: OK
+candidates.json: OK
+session.json: OK
+config_used.json: OK
+overlay_used.json: OK
+-r--r--r-- 1 box box  409 Oct 27 14:25 SHA256SUMS
+-r--r--r-- 1 box box 3440 Oct 27 14:25 candidates.csv
+-r--r--r-- 1 box box 7576 Oct 27 14:25 candidates.json
+-r--r--r-- 1 box box 3518 Oct 27 14:25 config_used.json
+-r--r--r-- 1 box box  368 Oct 27 14:25 overlay_used.json
+-r--r--r-- 1 box box 1909 Oct 27 14:25 session.json
+
+$ python3 -c "import json; s=json.load(open(\"session.json\")); print(s[\"attestation\"]); print(s[\"integrity_note\"]); print(\"overlay\", s.get(\"overlay_file\")); print(s[\"host_clock\"])"
+The gate records the operator's attestation of authorization. It does not verify the ROE.
+0444 + SHA256SUMS supports integrity but is NOT tamper-proof; record the SHA256SUMS digest out-of-band (ROE log or custodian handoff).
+overlay /tmp/nwstage/nightwatchman.local.example.json
+{'recorded_at_utc': '2026-10-27T18:25:29Z', 'ntp_synchronized': 'unknown', 'timezone': 'unknown', 'source': 'unavailable'}

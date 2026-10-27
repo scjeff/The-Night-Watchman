@@ -1,0 +1,151 @@
+{
+  "_comment": "The Night Watchman watchlist (UNVERIFIED SEED). Calibrate against a real owned unit in a lab before survey use. Patterns are Python regular expressions, matched case-insensitively against the SSID, the Bluetooth advertised name, and the vendor name Kismet (or the optional IEEE CSV) gives for the MAC prefix. A match is a hypothesis, never a finding. Edit freely; every pattern is validated at start-up.",
+  "config_version": 1,
+  "ssid_patterns": [
+    {
+      "label": "Wolfbox dash cam",
+      "pattern": "wolf\\s*box"
+    },
+    {
+      "label": "VIOFO dash cam",
+      "pattern": "viofo"
+    },
+    {
+      "label": "70mai dash cam",
+      "pattern": "70\\s*mai"
+    },
+    {
+      "label": "Garmin dash cam",
+      "pattern": "garmin|gdc[-_ ]?\\d"
+    },
+    {
+      "label": "DDPAI dash cam",
+      "pattern": "ddpai"
+    },
+    {
+      "label": "Rexing dash cam",
+      "pattern": "rexing"
+    },
+    {
+      "label": "Nextbase dash cam",
+      "pattern": "nextbase"
+    },
+    {
+      "label": "Thinkware dash cam",
+      "pattern": "thinkware"
+    },
+    {
+      "label": "BlackVue dash cam",
+      "pattern": "blackvue"
+    },
+    {
+      "label": "Vantrue dash cam",
+      "pattern": "vantrue"
+    },
+    {
+      "label": "YI camera",
+      "pattern": "^yi[-_ ]|yicarcam|yi[-_ ]?dash"
+    },
+    {
+      "label": "Wyze camera",
+      "pattern": "wyze"
+    },
+    {
+      "label": "Ring camera",
+      "pattern": "^ring[-_ ]|ring[-_ ]?setup"
+    },
+    {
+      "label": "Arlo camera",
+      "pattern": "arlo"
+    },
+    {
+      "label": "Hikvision camera",
+      "pattern": "hikvision|^hik[-_ ]|ezviz"
+    },
+    {
+      "label": "Dahua camera",
+      "pattern": "dahua|imou"
+    },
+    {
+      "label": "Reolink camera",
+      "pattern": "reolink"
+    },
+    {
+      "label": "Generic IP camera",
+      "pattern": "(^|[^a-z])ipc([^a-z]|$)|ipcam|ip[-_ ]?camera"
+    },
+    {
+      "label": "Generic camera",
+      "pattern": "(^|[^a-z])cam([^a-z]|$)|camera|webcam"
+    },
+    {
+      "label": "Generic dash cam",
+      "pattern": "dash\\s*cam|car\\s*dvr|carcam|dashcam"
+    },
+    {
+      "label": "Generic DVR/NVR",
+      "pattern": "(^|[^a-z])(dvr|nvr)([^a-z]|$)"
+    },
+    {
+      "label": "Analog/FPV video link",
+      "pattern": "fpv|wifi[-_ ]?uav"
+    }
+  ],
+  "vendor_patterns": [
+    {
+      "label": "Hikvision",
+      "pattern": "hikvision|hangzhou hikvision"
+    },
+    {
+      "label": "Dahua",
+      "pattern": "dahua|zhejiang dahua"
+    },
+    {
+      "label": "Axis Communications",
+      "pattern": "axis communications"
+    },
+    {
+      "label": "Hanwha / Samsung Techwin",
+      "pattern": "hanwha|samsung techwin"
+    },
+    {
+      "label": "Uniview",
+      "pattern": "uniview|zhejiang uniview"
+    },
+    {
+      "label": "Wyze",
+      "pattern": "wyze"
+    },
+    {
+      "label": "Ring",
+      "pattern": "^ring\\b"
+    },
+    {
+      "label": "Arlo",
+      "pattern": "arlo"
+    },
+    {
+      "label": "Reolink",
+      "pattern": "reolink"
+    },
+    {
+      "label": "Amcrest",
+      "pattern": "amcrest"
+    },
+    {
+      "label": "Garmin",
+      "pattern": "garmin"
+    },
+    {
+      "label": "Wolfbox",
+      "pattern": "wolfbox"
+    }
+  ],
+  "oui_prefixes": [],
+  "_oui_prefixes_help": "Optional exact MAC prefixes, e.g. {\"prefix\": \"AA:BB:CC\", \"label\": \"Vendor X\"}. Copy them from the IEEE registry yourself; none ship by default so nothing here is guessed.",
+  "trend": {
+    "min_samples": 4,
+    "varying_db": 8.0,
+    "steady_db": 4.0
+  }
+}

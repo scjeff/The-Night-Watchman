@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+
+# Downloaded or local vendor table. Not part of the repo.
+ieee_mac_vendors.csv
+
+# Survey output and Kismet logs. Do not commit.
+nightwatchman_*/
+*.kismet
+*.pcapng
+*.pcap
+
+# Local watchlist overlay (device-specific; not for the public tree)
+nightwatchman.local.json
+TARGET_DEVICES.local.md
+
+# Local notes (not for the public tree)
+*.local.md

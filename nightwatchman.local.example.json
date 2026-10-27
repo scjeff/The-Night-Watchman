@@ -1,0 +1,9 @@
+{
+  "_comment": "EXAMPLE local overlay. Copy to nightwatchman.local.json (gitignored) or pass with --watchlist-extra. Entries here are unverified until calibrated against a real owned unit in a lab. Do not invent SSID formats.",
+  "model_patterns": [
+    {
+      "label": "EXAMPLE model string (replace me)",
+      "pattern": "example[-_ ]?model[-_ ]?123"
+    }
+  ]
+}
