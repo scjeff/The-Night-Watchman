@@ -217,19 +217,6 @@ All files are set read-only (`0444`) after the run. **`0444` plus `SHA256SUMS` s
 
 SSIDs and names are attacker-controlled. The tool strips control characters, ANSI escapes, and bidi/zero-width characters before it prints or writes them, and caps their length. Any CSV text cell that starts with `= + - @ | %`, a tab, or a CR is prefixed with `'`. The exact bytes are kept as hex (`ssid_hex`, `bt_name_hex`) as evidence.
 
-## Control mapping (800-53 control families)
-
-| Control | How the tool supports it |
-| --- | --- |
-| **AC-18** Wireless Access | Finds wireless emitters that may be unauthorized (camera and dash cam hotspots) for the AC-18 review |
-| **CM-8** System Component Inventory | Candidate list with MAC, vendor, and SSID that you can reconcile against the authorized wireless inventory |
-| **CM-8(3)** Automated Unauthorized Component Detection | Automated comparison of observed names/vendors against a watchlist of camera-like patterns |
-| **SI-4** System Monitoring | Periodic passive monitoring of the wireless environment. Output feeds analysis and escalation, not automated response |
-| **SI-4(14)** Wireless Intrusion Detection | Passive-only detection of wireless emitters whose advertisements resemble camera or dash cam devices |
-| **AU-3** Content of Audit Records | Each record carries what (candidate and basis), when (first and last seen, UTC), where (channel), the source (MAC/BSSID), and who ran it (operator, ROE ID, authorization). SHA-256 sums and read-only files support integrity (AU-9) but are not tamper-proof |
-
-This mapping shows what the tool's output can support. It is not a control assessment.
-
 ## Limitations
 
 - **No candidates does not show that no camera is present.** A renamed, hidden, wired, record-only, cellular, or analog camera will not match. An empty candidate list is not a clearance.
