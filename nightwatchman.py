@@ -73,6 +73,7 @@ import base64
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -93,7 +94,7 @@ from typing import Any, Iterable, Optional
 
 TOOL_NAME = "The Night Watchman"
 TOOL_ID = "nightwatchman"
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 MIN_PYTHON = (3, 9)
 DEFAULT_KISMET_URL = "http://127.0.0.1:2501"
 DEFAULT_CONFIG = "nightwatchman.json"
@@ -515,6 +516,11 @@ class Observation:
     signal_dbm: Optional[float]
     first_time: Optional[float]
     last_time: Optional[float]
+    # Extra beaconed SSIDs or Bluetooth names on the same device. Probe
+    # requests are not stored: a phone that looked for a camera SSID is not
+    # the camera.
+    ssid_extra: tuple[str, ...] = ()
+    btname_extra: tuple[str, ...] = ()
 
 
 def _num(value: Any) -> Optional[float]:
@@ -523,6 +529,73 @@ def _num(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return out
+
+
+def _plain_text(value: Any) -> str:
+    """Names are text. Kismet uses a number (usually 0) when a device has no SSID."""
+    if value is None or isinstance(value, (dict, list, bool, int, float)):
+        return ""
+    return str(value).strip()
+
+
+def _unique_text(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _not_this_mac(text: str, mac: str) -> bool:
+    return bool(text) and normalize_mac(text) != mac
+
+
+def _is_bluetooth(phy: str, dev: dict) -> bool:
+    folded = phy.lower()
+    if "bluetooth" in folded or "btle" in folded or folded in {"bt", "br/edr"}:
+        return True
+    return isinstance(dev.get("bluetooth.device"), dict) or isinstance(dev.get("btle.device"), dict)
+
+
+def _beacon_ssids(dev: dict) -> list[str]:
+    """Beaconed / advertised SSIDs only. Client probe lists are left alone."""
+    found: list[str] = []
+    if "ssid" in dev:
+        text = _plain_text(dev.get("ssid"))
+        if text:
+            found.append(text)
+    dot11 = dev.get("dot11.device")
+    if isinstance(dot11, dict):
+        last = dot11.get("dot11.device.last_beaconed_ssid_record")
+        if isinstance(last, dict):
+            text = _plain_text(last.get("dot11.advertisedssid.ssid"))
+            if text:
+                found.append(text)
+        amap = dot11.get("dot11.device.advertised_ssid_map")
+        records: list[Any]
+        if isinstance(amap, dict):
+            records = list(amap.values())
+        elif isinstance(amap, list):
+            records = amap
+        else:
+            records = []
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            text = _plain_text(rec.get("dot11.advertisedssid.ssid"))
+            if text:
+                found.append(text)
+    return _unique_text(found)
+
+
+def _signal_dbm(value: Any) -> Optional[float]:
+    if isinstance(value, dict):
+        value = value.get("kismet.common.signal.last_signal")
+    sig = _num(value)
+    # Kismet stores 0 when it has no dBm sample. Positive values are not dBm.
+    if sig is None or sig >= 0 or sig < -120:
+        return None
+    return sig
 
 
 def parse_device(dev: Any) -> Optional[Observation]:
@@ -540,50 +613,58 @@ def parse_device(dev: Any) -> Optional[Observation]:
         return None
     phy = str(pick("phy", "kismet.device.base.phyname") or "")
     dtype = str(pick("type", "kismet.device.base.type") or "")
-    ssid = pick(
-        "ssid",
-        "dot11.device",
-        "dot11.device.last_beaconed_ssid_record",
-        "dot11.advertisedssid.ssid",
-    )
-    commonname = pick("commonname", "kismet.device.base.commonname")
-    name = pick("name", "kismet.device.base.name")
-    is_bt = "bluetooth" in phy.lower() or "btle" in phy.lower() or "bt" == phy.lower()
-    btname = ""
+    is_bt = _is_bluetooth(phy, dev)
+    commonname = _plain_text(pick("commonname", "kismet.device.base.commonname"))
+    name = _plain_text(pick("name", "kismet.device.base.name"))
+    beaconed = [] if is_bt else _beacon_ssids(dev)
+    bt_names: list[str] = []
     if is_bt:
+        bt = dev.get("bluetooth.device")
+        if isinstance(bt, dict):
+            for key in ("bluetooth.device.device_name", "bluetooth.device.name"):
+                text = _plain_text(bt.get(key))
+                if _not_this_mac(text, mac):
+                    bt_names.append(text)
+        btle = dev.get("btle.device")
+        if isinstance(btle, dict):
+            for key, value in btle.items():
+                if "name" in str(key).lower():
+                    text = _plain_text(value)
+                    if _not_this_mac(text, mac):
+                        bt_names.append(text)
         for cand in (name, commonname):
-            if cand and normalize_mac(cand) != mac:
-                btname = str(cand)
-                break
-    if not ssid and not is_bt:
+            if _not_this_mac(cand, mac):
+                bt_names.append(cand)
+        bt_names = _unique_text(bt_names)
+    elif not beaconed:
         # Basic-field fallback (no dot11 paths): Kismet's commonname / name
         # usually carries the SSID for an AP. Skip it when it is only the MAC.
         for cand in (commonname, name):
-            if cand and normalize_mac(cand) != mac:
-                ssid = cand
+            if _not_this_mac(cand, mac):
+                beaconed.append(cand)
                 break
     last_bssid = normalize_mac(pick("last_bssid", "dot11.device", "dot11.device.last_bssid"))
     if not last_bssid or last_bssid == "00:00:00:00:00:00":
         last_bssid = mac if ("ap" in dtype.lower() and not is_bt) else ""
-    sig = _num(pick("signal", "kismet.device.base.signal", "kismet.common.signal.last_signal"))
-    if sig is not None and (sig >= 0 or sig < -120):
-        sig = None  # Kismet stores 0 when it has no dBm sample.
     freq = _num(pick("frequency", "kismet.device.base.frequency"))
     channel = str(pick("channel", "kismet.device.base.channel") or "")
+    # kismet.device.base.frequency is kilohertz (2412000 for 2412 MHz).
     if not channel and freq:
         channel = f"{freq / 1000.0:.0f} MHz" if freq > 100000 else f"{freq:.0f} MHz"
     return Observation(
         mac=mac,
         phy=phy,
         dtype=dtype,
-        ssid_raw=str(ssid) if ssid else "",
-        btname_raw=btname,
+        ssid_raw=beaconed[0] if beaconed else "",
+        btname_raw=bt_names[0] if bt_names else "",
         bssid=last_bssid,
         vendor=str(pick("manuf", "kismet.device.base.manuf") or ""),
         channel=channel,
-        signal_dbm=sig,
+        signal_dbm=_signal_dbm(pick("signal", "kismet.device.base.signal", "kismet.common.signal.last_signal")),
         first_time=_num(pick("first_time", "kismet.device.base.first_time")),
         last_time=_num(pick("last_time", "kismet.device.base.last_time")),
+        ssid_extra=tuple(beaconed[1:]),
+        btname_extra=tuple(bt_names[1:]),
     )
 
 
@@ -631,35 +712,41 @@ def combine_basis(name_label: str, name_kind: str, vendor_label: str) -> Optiona
     return None
 
 
-def classify(obs: Observation, wl: Watchlist, ieee: dict[str, str]) -> Optional[tuple[str, str, str, str, str]]:
-    """Return (basis, name_label, name_kind, vendor_label, vendor_text) or None."""
-    name_label = ""
-    name_kind = ""
-    # Brand / generic SSID and Bluetooth-name patterns first.
-    for kind, text in (("name", obs.ssid_raw), ("bt_name", obs.btname_raw)):
+def _match_patterns(texts: Iterable[str], patterns: list[Pattern]) -> tuple[str, str]:
+    for text in texts:
         if not text:
             continue
         probe = sanitize_text(text, MAX_MATCH_LEN)
-        for pat in wl.ssid:
+        for pat in patterns:
             if pat.regex.search(probe):
-                name_label, name_kind = pat.label, kind
-                break
-        if name_label:
+                return pat.label, text
+    return "", ""
+
+
+def classify(obs: Observation, wl: Watchlist, ieee: dict[str, str]) -> Optional[tuple[str, str, str, str, str, str]]:
+    """Return (basis, name_label, name_kind, vendor_label, vendor_text, matched_text) or None."""
+    name_label = ""
+    name_kind = ""
+    matched_text = ""
+    # Brand / generic SSID and Bluetooth-name patterns first.
+    for kind, texts in (
+        ("name", (obs.ssid_raw, *obs.ssid_extra)),
+        ("bt_name", (obs.btname_raw, *obs.btname_extra)),
+    ):
+        label, text = _match_patterns(texts, wl.ssid)
+        if label:
+            name_label, name_kind, matched_text = label, kind, text
             break
     # Optional model-string patterns (usually from a local overlay). Used only
     # when no brand/generic name matched. Listing model names are unverified
     # as SSID or Bluetooth strings.
     if not name_label:
-        for text in (obs.ssid_raw, obs.btname_raw):
-            if not text:
-                continue
-            probe = sanitize_text(text, MAX_MATCH_LEN)
-            for pat in wl.model:
-                if pat.regex.search(probe):
-                    name_label, name_kind = pat.label, "model"
-                    break
-            if name_label:
-                break
+        label, text = _match_patterns(
+            (obs.ssid_raw, *obs.ssid_extra, obs.btname_raw, *obs.btname_extra),
+            wl.model,
+        )
+        if label:
+            name_label, name_kind, matched_text = label, "model", text
     vendor_text = obs.vendor
     if (not vendor_text or vendor_text.lower() == "unknown") and not is_locally_administered(obs.mac):
         vendor_text = lookup_prefix(obs.mac, ieee) or vendor_text
@@ -673,7 +760,7 @@ def classify(obs: Observation, wl: Watchlist, ieee: dict[str, str]) -> Optional[
     basis = combine_basis(name_label, name_kind, vendor_label)
     if basis is None:
         return None
-    return basis, name_label, name_kind, vendor_label, vendor_text
+    return basis, name_label, name_kind, vendor_label, vendor_text, matched_text
 
 
 def signal_trend(samples: Iterable[tuple[float, float]], wl: Watchlist) -> str:
@@ -703,7 +790,11 @@ class Tracker:
         if hit is None and cand is None:
             return None
         if cand is None:
-            basis, nlabel, nkind, vlabel, vtext = hit  # type: ignore[misc]
+            basis, nlabel, nkind, vlabel, vtext, matched = hit  # type: ignore[misc]
+            if matched and nkind == "bt_name":
+                obs = Observation(**{**obs.__dict__, "btname_raw": matched})
+            elif matched and nkind in {"name", "model"}:
+                obs = Observation(**{**obs.__dict__, "ssid_raw": matched})
             cand = Candidate(
                 mac=obs.mac, phy=obs.phy, dtype=obs.dtype, ssid_raw=obs.ssid_raw,
                 btname_raw=obs.btname_raw, bssid=obs.bssid, vendor=vtext,
@@ -714,7 +805,11 @@ class Tracker:
             self.candidates[obs.mac] = cand
         else:
             if hit is not None:
-                _, nlabel, nkind, vlabel, vtext = hit
+                _, nlabel, nkind, vlabel, vtext, matched = hit
+                if matched and nkind == "bt_name":
+                    obs = Observation(**{**obs.__dict__, "btname_raw": matched})
+                elif matched and nkind in {"name", "model"}:
+                    obs = Observation(**{**obs.__dict__, "ssid_raw": matched})
                 # Labels are sticky: a later hit adds evidence, it never erases
                 # an earlier name or vendor match. Basis is recomputed from both.
                 # Prefer a later brand/strict name over an earlier generic one
@@ -755,7 +850,9 @@ class Tracker:
 
 
 class KismetError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class KismetClient:
@@ -790,18 +887,18 @@ class KismetClient:
         mode = "token" if "Cookie" in self._headers else ("basic" if "Authorization" in self._headers else "none")
         return f"{self.base} (auth: {mode})"
 
-    def _open(self, path: str, data: Optional[bytes] = None, ctype: str = "") -> Any:
+    def _open(self, path: str, data: Optional[bytes] = None, ctype: str = "", timeout: Optional[float] = None) -> Any:
         headers = dict(self._headers)
         if ctype:
             headers["Content-Type"] = ctype
         req = urllib.request.Request(self.base + path, data=data, headers=headers, method="POST" if data is not None else "GET")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout if timeout is None else timeout) as resp:
                 raw = resp.read(64 * 1024 * 1024).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             code = exc.code
             exc.close()
-            raise KismetError(f"HTTP {code} from {path}") from None
+            raise KismetError(f"HTTP {code} from {path}", status=code) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             raise KismetError(f"cannot reach Kismet at {self.base}: {sanitize_text(reason, 120)}") from None
@@ -815,16 +912,46 @@ class KismetClient:
     def get_json(self, path: str) -> Any:
         return self._open(path)
 
-    def post_fields(self, path: str, payload: dict[str, Any]) -> Any:
-        body = urllib.parse.urlencode({"json": json.dumps(payload)}).encode()
-        return self._open(path, body, "application/x-www-form-urlencoded")
+    def post_fields(self, path: str, payload: dict[str, Any], timeout: Optional[float] = None) -> Any:
+        """POST a field view. Kismet 2026 accepts a JSON body; older builds want a form field."""
+        raw = json.dumps(payload).encode()
+        bodies = (
+            (raw, "application/json"),
+            (
+                urllib.parse.urlencode({"json": raw.decode()}).encode(),
+                "application/x-www-form-urlencoded",
+            ),
+        )
+        errors: list[str] = []
+        last_status: Optional[int] = None
+        for body, ctype in bodies:
+            try:
+                return self._open(path, body, ctype, timeout=timeout)
+            except KismetError as exc:
+                last_status = exc.status
+                errors.append(str(exc))
+                # Auth and reachability failures are not a reason to try the other encoding.
+                if exc.status not in {400, 404, 405, 415, 500}:
+                    raise
+        raise KismetError("Kismet POST failed: " + "; ".join(errors), status=last_status)
 
 
 def _entry_log_type(entry: dict) -> str:
+    """Log type from a flat field, or from Kismet 2026's nested type driver.
+
+    The nested description often mentions the word "packet" for a metadata log.
+    Only the class/type strings are read, not that description.
+    """
     for key in ("kismet.logfile.type", "log_type", "type", "class", "logclass"):
         val = entry.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip().lower()
+    driver = entry.get("kismet.log.type_driver")
+    if isinstance(driver, dict):
+        for key in ("kismet.logfile.type.class", "class", "type", "kismet.logfile.type.name"):
+            val = driver.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip().lower()
     return ""
 
 
@@ -910,51 +1037,90 @@ def enforce_packet_logging_gate(risks: list[str], allow: bool) -> list[str]:
     raise PacketLoggingRisk(risks)
 
 
+def _as_device_list(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if "mac" in data or "kismet.device.base.macaddr" in data:
+            return [data]
+        for value in data.values():
+            if isinstance(value, list):
+                return value
+    return []
+
+
 class LiveSource:
     def __init__(self, client: KismetClient, start: float) -> None:
         self.client = client
-        self.since = int(start) - 30
+        self.since = max(int(start) - 30, 0)
         self.fields = KISMET_FIELDS
+        self._bootstrapped = False
 
     def poll(self) -> list[Any]:
-        stamp = max(self.since, 0)
+        # The first poll reads every device the server already holds. Later
+        # polls ask for devices heard in the last few seconds, with overlap.
+        stamp = 0 if not self._bootstrapped else max(self.since, 0)
         path = f"/devices/last-time/{stamp}/devices.json"
         try:
-            data = self.client.post_fields(path, {"fields": self.fields})
+            data = self.client.post_fields(path, {"fields": self.fields}, timeout=30)
         except KismetError as exc:
-            if str(exc).startswith("HTTP") and self.fields is not KISMET_FIELDS_BASIC:
+            if exc.status in {400, 500} and self.fields is not KISMET_FIELDS_BASIC:
                 log(
                     "Kismet rejected the dot11 fields; retrying with base fields; "
                     "SSID taken from commonname/name if present.",
                     "warn",
                 )
                 self.fields = KISMET_FIELDS_BASIC
-                data = self.client.post_fields(path, {"fields": self.fields})
+                data = self.client.post_fields(path, {"fields": self.fields}, timeout=30)
             else:
                 raise
+        self._bootstrapped = True
         self.since = int(time.time()) - 10
-        return data if isinstance(data, list) else []
+        return _as_device_list(data)
 
 
-def read_kismetdb(path: Path) -> tuple[list[Any], list[str]]:
-    """Device JSON from a .kismet log, opened read-only. Packets are never read."""
-    warnings: list[str] = []
+def _open_kismetdb(path: Path) -> sqlite3.Connection:
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         raise KismetError(f"cannot open {path}: {exc}") from None
+
+
+def kismetdb_risks(path: Path) -> list[str]:
+    """Count packet rows only. Device JSON is not loaded until the gate allows it."""
+    conn = _open_kismetdb(path)
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "devices" not in tables:
             raise KismetError(f"{path} has no devices table; is it a .kismet log?")
-        for tbl in ("packets", "data"):
-            if tbl in tables:
-                try:
-                    n = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]  # tbl is a fixed literal
-                except sqlite3.Error:
-                    n = 0
-                if tbl == "packets" and n:
-                    warnings.append(f"{path.name} contains {n} logged packets. This tool does not read them; future surveys should set kis_log_packets=false.")
+        warnings: list[str] = []
+        # Table names are fixed literals, not user input.
+        for tbl, noun in (
+            ("packets", "logged packets"),
+            ("data", "logged data-packet rows"),
+        ):
+            if tbl not in tables:
+                continue
+            try:
+                n = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except sqlite3.Error:
+                n = 0
+            if n:
+                warnings.append(
+                    f"{path.name} contains {n} {noun}. This tool does not read them; "
+                    "future surveys should set kis_log_packets=false and kis_log_data_packets=false."
+                )
+        return warnings
+    except sqlite3.Error as exc:
+        raise KismetError(f"cannot read {path}: {exc}") from None
+    finally:
+        conn.close()
+
+
+def read_kismetdb_devices(path: Path) -> list[Any]:
+    """Device JSON from a .kismet log, opened read-only. Packet tables are not read."""
+    conn = _open_kismetdb(path)
+    try:
         out: list[Any] = []
         for (blob,) in conn.execute("SELECT device FROM devices"):
             if isinstance(blob, (bytes, bytearray)):
@@ -963,11 +1129,11 @@ def read_kismetdb(path: Path) -> tuple[list[Any], list[str]]:
                 out.append(json.loads(blob))
             except (TypeError, json.JSONDecodeError):
                 continue
+        return out
     except sqlite3.Error as exc:
         raise KismetError(f"cannot read {path}: {exc}") from None
     finally:
         conn.close()
-    return out, warnings
 
 
 # --------------------------------------------------------------------------
@@ -1004,6 +1170,19 @@ def _gate_value(name: str, value: Optional[str]) -> str:
     return clean
 
 
+def parse_timedatectl_show(text: str) -> dict[str, str]:
+    """Parse `timedatectl show` Key=value lines. Order is not the -p order."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
 def host_clock_state() -> dict[str, Any]:
     """Best-effort NTP / clock source. 'unknown' when timedatectl is unavailable."""
     out: dict[str, Any] = {
@@ -1017,24 +1196,27 @@ def host_clock_state() -> dict[str, Any]:
         return out
     try:
         proc = subprocess.run(
-            [timedatectl, "show", "-p", "NTPSynchronized", "-p", "Timezone", "--value"],
+            [timedatectl, "show", "-p", "NTPSynchronized", "-p", "Timezone"],
             capture_output=True, text=True, timeout=3, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return out
     if proc.returncode != 0:
         return out
-    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    # timedatectl show --value prints one value per -p, in order.
-    if lines:
-        val = lines[0].lower()
-        if val in {"yes", "no", "true", "false", "1", "0"}:
-            out["ntp_synchronized"] = "yes" if val in {"yes", "true", "1"} else "no"
-        else:
-            out["ntp_synchronized"] = sanitize_text(lines[0], 32)
+    vals = parse_timedatectl_show(proc.stdout)
+    ntp = vals.get("NTPSynchronized", "").lower()
+    if ntp in {"yes", "true", "1"}:
+        out["ntp_synchronized"] = "yes"
         out["source"] = "timedatectl"
-    if len(lines) >= 2:
-        out["timezone"] = sanitize_text(lines[1], 64)
+    elif ntp in {"no", "false", "0"}:
+        out["ntp_synchronized"] = "no"
+        out["source"] = "timedatectl"
+    elif ntp:
+        out["ntp_synchronized"] = sanitize_text(ntp, 32)
+        out["source"] = "timedatectl"
+    if vals.get("Timezone"):
+        out["timezone"] = sanitize_text(vals["Timezone"], 64)
+        out["source"] = "timedatectl"
     return out
 
 
@@ -1471,8 +1653,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.demo and args.kismetdb:
         log("Pick one of --demo and --kismetdb.", "err")
         return 2
-    if args.interval < 0 or args.duration < 0:
-        log("--interval and --duration must not be negative.", "err")
+    if not math.isfinite(args.interval) or args.interval <= 0:
+        log("--interval must be a positive finite number of seconds.", "err")
+        return 2
+    if not math.isfinite(args.duration) or args.duration < 0:
+        log("--duration must be zero or a positive finite number of seconds.", "err")
         return 2
 
     try:
@@ -1537,13 +1722,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.kismetdb:
             path = Path(args.kismetdb)
             source = f"kismetdb {path.name} sha256={sha256_file(path)}"
-            devices, w = read_kismetdb(path)
-            notices = enforce_packet_logging_gate(w, auth.allow_packet_logging_risk)
+            risks = kismetdb_risks(path)
+            notices = enforce_packet_logging_gate(risks, auth.allow_packet_logging_risk)
             warnings += notices
             emit_banner()
             for msg in notices:
                 log(msg, "warn")
-            for dev in devices:
+            for dev in read_kismetdb_devices(path):
                 obs = parse_device(dev)
                 if obs:
                     tracker.ingest(obs, started)
@@ -1577,7 +1762,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     banner_printed = True
                     if deadline and time.time() >= deadline:
                         break
-                    time.sleep(max(args.interval, 1.0))
+                    time.sleep(args.interval)
             except KeyboardInterrupt:
                 log("Stopped by operator; writing reports.")
     except PacketLoggingRisk as exc:

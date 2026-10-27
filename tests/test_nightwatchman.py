@@ -392,6 +392,64 @@ class ParseDeviceTests(unittest.TestCase):
         obs = nw.parse_device({"mac": "AA:BB:CC:00:00:01", "signal": 0})
         self.assertIsNone(obs.signal_dbm)
 
+    def test_numeric_ssid_zero_is_not_a_name(self):
+        # Kismet 2026 field views return ssid: 0 when the device has no SSID.
+        obs = nw.parse_device({
+            "mac": "AA:BB:CC:00:00:01",
+            "phy": "IEEE802.11",
+            "ssid": 0,
+            "commonname": "AA:BB:CC:00:00:01",
+            "signal": -40,
+        })
+        self.assertEqual(obs.ssid_raw, "")
+
+    def test_numeric_ssid_falls_back_to_commonname(self):
+        obs = nw.parse_device({
+            "mac": "AA:BB:CC:00:00:01",
+            "phy": "IEEE802.11",
+            "type": "Wi-Fi AP",
+            "ssid": 0,
+            "commonname": "WOLFBOX_MODEL123",
+            "signal": -40,
+        })
+        self.assertEqual(obs.ssid_raw, "WOLFBOX_MODEL123")
+        hit = nw.classify(obs, wl_default(), {})
+        self.assertEqual(hit[0], "name")
+        self.assertEqual(hit[1], "Wolfbox dash cam")
+
+    def test_bluetooth_device_name_when_commonname_is_mac(self):
+        dev = {
+            "kismet.device.base.macaddr": "AA:BB:CC:00:00:0D",
+            "kismet.device.base.phyname": "Bluetooth",
+            "kismet.device.base.commonname": "AA:BB:CC:00:00:0D",
+            "kismet.device.base.name": "AA:BB:CC:00:00:0D",
+            "bluetooth.device": {"bluetooth.device.device_name": "VIOFO A119"},
+        }
+        obs = nw.parse_device(dev)
+        self.assertEqual(obs.btname_raw, "VIOFO A119")
+        self.assertEqual(obs.ssid_raw, "")
+        self.assertEqual(nw.classify(obs, wl_default(), {})[0], "bt_name")
+
+    def test_advertised_ssid_map_list_ignores_probes(self):
+        dev = {
+            "kismet.device.base.macaddr": "AA:BB:CC:00:00:0E",
+            "kismet.device.base.phyname": "IEEE802.11",
+            "kismet.device.base.type": "Wi-Fi AP",
+            "dot11.device": {
+                "dot11.device.last_beaconed_ssid_record": {"dot11.advertisedssid.ssid": 0},
+                "dot11.device.advertised_ssid_map": [
+                    {"dot11.advertisedssid.ssid": "70mai_D08"},
+                ],
+                "dot11.device.probed_ssid_map": [
+                    {"dot11.probedssid.ssid": "WOLFBOX_SHOULD_NOT_MATCH"},
+                ],
+            },
+        }
+        obs = nw.parse_device(dev)
+        self.assertEqual(obs.ssid_raw, "70mai_D08")
+        self.assertNotIn("WOLFBOX", obs.ssid_raw)
+        self.assertEqual(nw.classify(obs, wl_default(), {})[1], "70mai dash cam")
+
     def test_bad_mac_dropped(self):
         self.assertIsNone(nw.parse_device({"mac": "nope"}))
         self.assertIsNone(nw.parse_device("not a dict"))
@@ -416,6 +474,30 @@ class PcapDetectTests(unittest.TestCase):
         self.assertEqual(nw.packet_logging_warnings_from_active([
             {"kismet.logfile.type": "kismetdb", "note": "pcap disabled"},
         ]), [])
+
+    def test_kismet_2026_nested_type_driver_is_not_pcap(self):
+        # 2026.10 puts the type under kismet.log.type_driver. The description
+        # mentions packets even when the log is metadata-only.
+        entry = {
+            "kismet.log.type_driver": {
+                "kismet.logfile.type.class": "kismet",
+                "kismet.logfile.type.name": "Kismet Unified Log",
+                "kismet.logfile.type.description": (
+                    "Unified Kismet log containing device, data source, packet, "
+                    "alert, and other runtime data"
+                ),
+            },
+            "kismet.logfile.path": "/tmp/nwlab-20261027-18-37-17-1.kismet",
+        }
+        self.assertFalse(nw.entry_is_pcap_log(entry))
+        self.assertEqual(nw.packet_logging_warnings_from_active([entry]), [])
+
+    def test_kismet_2026_nested_pcapng_class(self):
+        entry = {
+            "kismet.log.type_driver": {"kismet.logfile.type.class": "pcapng"},
+            "kismet.logfile.path": "/tmp/capture.log",
+        }
+        self.assertTrue(nw.entry_is_pcap_log(entry))
 
 
 class GateTests(unittest.TestCase):
@@ -665,8 +747,15 @@ class MockKismet(BaseHTTPRequestHandler):
         if not self._authed():
             return self._send(401, {"error": "auth"})
         length = int(self.headers.get("Content-Length", 0))
-        form = parse_qs(self.rfile.read(length).decode())
-        fields = json.loads(form["json"][0])["fields"]
+        raw = self.rfile.read(length)
+        ctype = self.headers.get("Content-Type", "")
+        if MockKismet.mode == "json415" and "application/json" in ctype:
+            return self._send(415, {"error": "use form"})
+        if "application/json" in ctype:
+            fields = json.loads(raw.decode())["fields"]
+        else:
+            form = parse_qs(raw.decode())
+            fields = json.loads(form["json"][0])["fields"]
         assert ["kismet.device.base.macaddr", "mac"] in fields
         if self.path.startswith("/devices/last-time/"):
             return self._send(200, [
@@ -784,9 +873,20 @@ class LiveMockTests(unittest.TestCase):
         with self.assertRaises(nw.KismetError):
             nw.KismetClient("http://u:p@127.0.0.1:2501")
 
+    def test_live_falls_back_from_json_to_form(self):
+        MockKismet.mode = "json415"
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td, "live")
+            rc, stdout, stderr = run_main(
+                ["--kismet-url", self.url, "--duration", "0.01", "--no-clear", "-o", str(out)] + GATE
+            )
+            self.assertEqual(rc, 0, stderr)
+            self.assertIn("70mai_D08_1234", stdout)
+            verify_outputs(self, out)
+
 
 class KismetDBTests(unittest.TestCase):
-    def _make_db(self, td: Path, *, with_packets: bool) -> Path:
+    def _make_db(self, td: Path, *, with_packets: bool, with_data: bool = False) -> Path:
         db = td / "survey.kismet"
         conn = sqlite3.connect(db)
         conn.execute(
@@ -796,6 +896,9 @@ class KismetDBTests(unittest.TestCase):
         if with_packets:
             conn.execute("CREATE TABLE packets (ts_sec INT, packet BLOB)")
             conn.execute("INSERT INTO packets VALUES (1, x'00')")
+        if with_data:
+            conn.execute("CREATE TABLE data (ts_sec INT, data BLOB)")
+            conn.execute("INSERT INTO data VALUES (1, x'00')")
         dev = {
             "kismet.device.base.macaddr": "AA:BB:CC:00:00:01",
             "kismet.device.base.phyname": "IEEE802.11",
@@ -834,6 +937,15 @@ class KismetDBTests(unittest.TestCase):
             self.assertIn("DDPAI_Z40", stdout)
             verify_outputs(self, out, expect_override=True)
 
+    def test_kismetdb_data_rows_refuse(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self._make_db(Path(td), with_packets=False, with_data=True)
+            out = Path(td, "out")
+            rc, _, err = run_main(["--kismetdb", str(db), "-o", str(out)] + GATE)
+            self.assertEqual(rc, 2)
+            self.assertIn("data-packet", err)
+            self.assertFalse(out.exists())
+
     def test_kismetdb_clean(self):
         with tempfile.TemporaryDirectory() as td:
             db = self._make_db(Path(td), with_packets=False)
@@ -858,11 +970,30 @@ class ScopeMainTests(unittest.TestCase):
 
 
 class HostClockTests(unittest.TestCase):
+    def test_timedatectl_keys_ignore_print_order(self):
+        # This host prints Timezone before NTPSynchronized. --value would swap them.
+        vals = nw.parse_timedatectl_show("Timezone=America/New_York\nNTPSynchronized=yes\n")
+        self.assertEqual(vals["NTPSynchronized"], "yes")
+        self.assertEqual(vals["Timezone"], "America/New_York")
+
     def test_host_clock_shape(self):
         clock = nw.host_clock_state()
         self.assertIn(clock["ntp_synchronized"], {"yes", "no", "unknown"})
+        self.assertNotIn("/", clock["ntp_synchronized"])
         self.assertIn("recorded_at_utc", clock)
         self.assertTrue(clock["recorded_at_utc"].endswith("Z"))
+
+
+class SpanTests(unittest.TestCase):
+    def test_rejects_non_finite_duration(self):
+        rc, _, err = run_main(["--duration", "nan"])
+        self.assertEqual(rc, 2)
+        self.assertIn("duration", err.lower())
+
+    def test_rejects_non_positive_interval(self):
+        rc, _, err = run_main(["--interval", "inf"])
+        self.assertEqual(rc, 2)
+        self.assertIn("interval", err.lower())
 
 
 if __name__ == "__main__":

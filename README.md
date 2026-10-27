@@ -6,7 +6,7 @@ The program file is **`nightwatchman.py`**.
 
 The name comes from the Night Watchman in Wagner’s *Die Meistersinger von Nürnberg*. He walks the town after dark, calls the hour, and reports what he sees. He arrests no one. [The Magic Flute](https://github.com/scjeff/The-Magic-Flute) writes down every radio it hears, and [The Marksman](https://github.com/scjeff/The-Marksman) follows one mark. The Night Watchman reads what Kismet already heard and calls out the names that look like cameras.
 
-**Experimental:** not validated against a live Kismet. Matching rules are hypotheses until calibrated on a lab unit.
+**Beta:** This program is in beta. It can read a metadata-only Kismet 2026.10 session (see [Tests performed](#tests-performed)). I have not yet tested it with a wireless dashcam or a rearview camera in range, so the matching rules are still hypotheses.
 
 **Data source:** this tool talks to [Kismet](https://www.kismetwireless.net/) over its REST API or reads a finished `.kismet` log. No Kismet source code is copied into this repository (the client only uses documented field names and HTTP endpoints).
 
@@ -14,7 +14,7 @@ The name comes from the Night Watchman in Wagner’s *Die Meistersinger von Nür
 
 **Authorized use only. No warranty.** Use only with written authorization / rules of engagement, or on your own devices. This program is free software under GPL-3.0-or-later and comes with **NO WARRANTY**, to the extent permitted by law (see [LICENSE](LICENSE)).
 
-Python 3.9+ stdlib only. No `pip` packages. Licensed under **GPL-3.0-or-later**. Version **0.2.2**.
+Python 3.9+ stdlib only. No `pip` packages. Licensed under **GPL-3.0-or-later**. Version **0.3.0**.
 
 ## Disclaimer: authorized use only
 
@@ -76,7 +76,7 @@ By default the tool **refuses to start** when:
 
 - Kismet reports an active pcap / packet log (`pcapng`, `pcapppi`, or `pcap` type, or a `.pcap` / `.pcapng` path), or
 - `/logging/active.json` cannot be read or parsed (live mode), or
-- a `.kismet` file contains rows in its `packets` table
+- a `.kismet` file contains rows in its `packets` table or its `data` table (data-packet rows)
 
 Pass `--allow-packet-logging-risk` to override. The override is written into every output header, the console banner, and `session.json`. Detection uses log-type fields and path suffixes only; a note that says "pcap disabled" does not trip it.
 
@@ -91,7 +91,6 @@ The raw Kismet log and a live Kismet session hold metadata on **every device in 
 ## Quick start
 
 ```bash
-cd camera-hunter
 python3 nightwatchman.py --self-test
 
 # Offline demo: bundled fixture, no Kismet, no radio
@@ -136,6 +135,24 @@ httpd_bind_address=127.0.0.1
 ```
 
 Leave `pcapng` and `pcapppi` out of `log_types`. To keep no log at all and use only the live API, start Kismet with `-n` (`--no-logging`).
+
+A stock `/etc/kismet/kismet_logging.conf` often already sets `log_types=kismet` and still sets `kis_log_packets=true`. That log has a `packets` table, and this tool refuses it. Put the packet lines in `kismet_site.conf` or pass an `--override` file. `kismet_site.conf` is the file Kismet merges over the packaged logging config.
+
+Kismet 2026.10 reports the log type under `kismet.log.type_driver` → `kismet.logfile.type.class`, not as a top-level `kismet.logfile.type`. A metadata log's class is `kismet`. Its description mentions the word "packet"; that text is not treated as packet logging. A class of `pcapng`, `pcapppi`, or `pcap` is refused even when the path does not end in `.pcap` or `.pcapng`.
+
+The first live poll reads every device the server already holds (`/devices/last-time/0`). Later polls ask only for devices heard in the last few seconds. Kismet's simplified SSID field is the number `0` when a device has no SSID. Bluetooth advertised names are taken from `bluetooth.device.device_name` when that field exists, otherwise from `commonname` / `name` when those are not just the MAC. Client probe lists are not matched: a phone that looked for a camera network is not reported as the camera.
+
+The Night Watchman does not start Kismet and does not open a radio. Start Kismet yourself, with packet logging off, then point this program at it. On Kismet 2026.10 a MediaTek mt76 / Panda adapter is listed twice (`mt7921-0` usbwifi, and `wlx…` linuxwifi). Do not open both. Opening `mt7921-0` detaches the kernel driver, and putting it back needs root. The kernel name works through `kismet_cap_linux_wifi`. Do not capture on the interface that carries your only route.
+
+Kismet may leave a radiotap interface behind when it exits. The name is often `kismon0`. Removing it needs root (`sudo iw dev kismon0 del`).
+
+## Tests performed
+
+This program is in beta. The notes below are about the client.
+
+Offline, `python3 -m unittest discover -s tests -v` runs 80 tests against a mock Kismet and fixtures. Those tests cover the Kismet 2026.10 log-type shape, an empty SSID stored as the number `0`, and beaconed names rather than probe requests.
+
+The live reader and the `--kismetdb` reader were both exercised against a metadata-only Kismet 2026.10 session. I have not yet tested the program with a wireless dashcam or a rearview camera present. A match is only a name or vendor hypothesis. An empty result is not a calibration of the watchlist, and it is not evidence that no camera is there.
 
 ## Target devices
 
@@ -221,8 +238,9 @@ This mapping shows what the tool's output can support. It is not a control asses
 - **Bluetooth names** are flagged only when Kismet has a Bluetooth source and the device advertises a name. Random BLE addresses have no IEEE vendor.
 - **Vendor lookup** depends on Kismet's `manuf` field or the optional IEEE CSV. Locally administered (randomized) MACs are never looked up.
 - **Trend** is a hint. It is not a position, a range, or a motion detector.
-- **Kismet API field names** follow the same simplified-field paths The Magic Flute uses. If a build rejects the `dot11` fields, the tool falls back to base fields and tries `commonname` / `name` as the SSID when they are not just the MAC. The `/logging/active.json` check uses log-type fields and path suffixes, because field names vary by build.
-- **Testing:** the tests use a mock Kismet server and synthetic fixtures. Nothing in this repository has been run against Kismet with live hardware.
+- **Kismet API field names** follow the same simplified-field paths The Magic Flute uses. If a build rejects the `dot11` fields, the tool falls back to base fields and tries `commonname` / `name` as the SSID when they are not just the MAC. Kismet 2026.10 returns SSID `0` when there is no SSID. The `/logging/active.json` check reads flat type fields, the 2026 nested `kismet.log.type_driver` class, and `.pcap` / `.pcapng` path suffixes. A description that says "packet" does not trip it.
+- **Probe requests are ignored.** Only beaconed or advertised SSIDs, Bluetooth advertised names, and vendor names are matched.
+- **Testing:** 80 offline tests pass against a mock Kismet and fixtures. The live reader and the `--kismetdb` reader were exercised on a metadata-only Kismet 2026.10 session. I have not yet tested the program with a wireless dashcam or a rearview camera present, so the watchlist is still an unverified seed.
 
 ## Self-test
 
